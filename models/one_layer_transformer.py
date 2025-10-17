@@ -36,7 +36,11 @@ class OneLayerTransformer(nn.Module):
     """
 
     def __init__(
-        self, n_obs: int, n_state: int, n_ctrl: int = 0, cfg: TransformerConfig = None
+        self,
+        n_obs: int,
+        n_state: int,
+        n_ctrl: int = 0,
+        cfg: TransformerConfig = None,
     ):
         super().__init__()
         if cfg is None:
@@ -47,7 +51,9 @@ class OneLayerTransformer(nn.Module):
 
         # Optional positional encoding
         if cfg.use_positional_encoding:
-            self.pos_encoding = LearnedPositionalEncoding(cfg.d_model, cfg.max_len)
+            self.pos_encoding = LearnedPositionalEncoding(
+                cfg.d_model, cfg.max_len
+            )
         else:
             self.pos_encoding = None
 
@@ -65,8 +71,12 @@ class OneLayerTransformer(nn.Module):
 
     @staticmethod
     def causal_mask(T: int, device: torch.device) -> Tensor:
-        """Create causal mask for autoregressive behavior."""
-        return torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
+        """Create causal mask for autoregressive behavior (float -inf mask).
+        """
+        mask = torch.full((T, T), 0.0, device=device)
+        upper = torch.triu(torch.ones(T, T, device=device), 1) > 0
+        mask = mask.masked_fill(upper, float("-inf"))
+        return mask
 
     def forward(self, y: Tensor, u: Optional[Tensor] = None) -> Tensor:
         """Forward pass through the transformer.

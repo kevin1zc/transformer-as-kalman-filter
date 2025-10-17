@@ -9,9 +9,13 @@ This package contains different model architectures for state estimation:
 from .one_layer_transformer import OneLayerTransformer
 from .gru_model import GRUStateEstimator
 from .kalman_filter import kalman_filter_sequence
+from .filterformer import Filterformer
+from .particle_filter import particle_filter_sequence
 
 __all__ = [
     'OneLayerTransformer',
     'GRUStateEstimator',
-    'kalman_filter_sequence'
+    'kalman_filter_sequence',
+    'Filterformer',
+    'particle_filter_sequence'
 ]

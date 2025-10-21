@@ -9,7 +9,7 @@ API is designed to integrate with the project's nonlinear system utilities.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import torch
 from torch import Tensor
@@ -28,6 +28,91 @@ def multinomial_resample(weights: Tensor) -> Tensor:
     # torch.multinomial expects probs sum to 1 per row
     idx = torch.multinomial(weights, num_samples=N, replacement=True)
     return idx
+
+
+@torch.no_grad()
+def particle_filter_with_system(
+    system,
+    Y: Tensor,
+    *,
+    num_particles: int = 1024,
+    U: Optional[Tensor] = None,
+    x0_mean: Optional[Tensor] = None,
+    x0_std: float = 1.0,
+) -> Tensor:
+    """Run a bootstrap particle filter using a NonlinearSystem.
+
+    Args:
+        system: NonlinearSystem instance with f and g functions
+        Y: (B, T, n_y) observations
+        num_particles: number of particles
+        U: (B, T, n_u) or None
+        x0_mean: (B, n_x) initial mean; if None, zeros
+        x0_std: initial std for particle sampling
+    Returns:
+        XH: (B, T, n_x) estimated state means
+    """
+    device = Y.device
+    B, T, n_y = Y.shape
+    n_x = system.n_state
+
+    if x0_mean is None:
+        x0_mean = torch.zeros(B, n_x, device=device)
+    else:
+        x0_mean = x0_mean.to(device)
+
+    # Particles: (B, N, n_x)
+    x_particles = x0_mean.unsqueeze(1) + x0_std * torch.randn(
+        B, num_particles, n_x, device=device
+    )
+    # Weights: start uniform
+    log_w = torch.zeros(B, num_particles, device=device)
+
+    XH = torch.zeros(B, T, n_x, device=device)
+    q = system.q
+    r = system.r
+
+    for t in range(T):
+        # Propagate
+        if U is not None:
+            u_t = U[:, t]
+            u_rep = u_t.unsqueeze(1).expand(B, num_particles, -1)
+            x_in = x_particles.reshape(B * num_particles, n_x)
+            u_in = u_rep.reshape(B * num_particles, -1)
+            x_pred = system.system_generator.f(x_in, u_in)
+        else:
+            x_in = x_particles.reshape(B * num_particles, n_x)
+            x_pred = system.system_generator.f(x_in, None)
+        # Add process noise
+        x_pred = x_pred + q * torch.randn_like(x_pred)
+        x_particles = x_pred.reshape(B, num_particles, n_x)
+
+        # Weights update via likelihood p(y_t | x_t)
+        y_pred = system.system_generator.g(x_particles.reshape(B * num_particles, n_x))
+        y_pred = y_pred.reshape(B, num_particles, n_y)
+        y_t = Y[:, t].unsqueeze(1)  # (B,1,n_y)
+        resid = y_t - y_pred  # (B,N,n_y)
+        # Gaussian independent dims: log-likelihood up to constant
+        # log p = -0.5 * sum((resid/r)^2) - n_y*log(r) + const
+        ll = -0.5 * ((resid / max(r, 1e-6)) ** 2).sum(dim=-1)
+        log_w = log_w + ll
+
+        # Normalize weights
+        log_w = log_w - (torch.logsumexp(log_w, dim=1, keepdim=True))
+        w = torch.exp(log_w)
+
+        # Estimate mean
+        XH[:, t] = (w.unsqueeze(-1) * x_particles).sum(dim=1)
+
+        # Resample
+        idx = multinomial_resample(w)
+        # gather particles
+        batch_idx = torch.arange(B, device=device).unsqueeze(1)
+        x_particles = x_particles[batch_idx, idx]
+        # reset weights to uniform in log space
+        log_w = torch.zeros(B, num_particles, device=device)
+
+    return XH
 
 
 @torch.no_grad()

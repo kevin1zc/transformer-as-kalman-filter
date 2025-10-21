@@ -12,8 +12,7 @@ Reference: https://arxiv.org/pdf/2310.19603
 
 Design notes:
 - Causal multi-head self-attention to respect filtering causality.
-- Optional learned positional encoding (disabled by default to emphasize
-  path-based representation).
+- Learned positional encoding for sequence position awareness.
 - Outputs either state mean only, or mean and (diagonal) covariance
   parameters, enabling training with MSE or NLL objectives.
 
@@ -116,11 +115,8 @@ class Filterformer(nn.Module):
         in_dim = n_obs + (n_ctrl if n_ctrl > 0 else 0)
         self.in_proj = nn.Linear(in_dim, cfg.d_model)
 
-        self.pos_encoding = (
-            LearnedPositionalEncoding(cfg.d_model, cfg.max_len)
-            if cfg.use_positional_encoding
-            else None
-        )
+        # Always use positional encoding regardless of config
+        self.pos_encoding = LearnedPositionalEncoding(cfg.d_model, cfg.max_len)
 
         blocks = []
         for _ in range(num_layers):
@@ -147,8 +143,7 @@ class Filterformer(nn.Module):
         else:
             x_in = y
         h = self.in_proj(x_in)
-        if self.pos_encoding is not None:
-            h = self.pos_encoding(h)
+        h = self.pos_encoding(h)
 
         for blk in self.blocks:
             h = blk(h)

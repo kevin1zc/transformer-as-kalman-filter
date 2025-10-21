@@ -6,16 +6,18 @@ controls:
     x_{t+1} = f(x_t, u_t) + w_t
     y_t     = g(x_t) + v_t
 
-Example choices (chaotic-ish but stable with noise):
-  - f: smooth nonlinearity combining tanh and quadratic mixing
-  - g: nonlinear observation (e.g., sin/cos on subsets of the state)
+The system functions f and g are randomly generated for each system instance,
+providing diverse nonlinear dynamics for testing. Each system uses:
+  - f: Random combination of nonlinearities (tanh, sin, cos, polynomials)
+  - g: Random observation mapping with various transformations
 
 Noise w_t and v_t are Gaussian with user-specified standard deviations.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
+import random
 
 import torch
 from torch import Tensor
@@ -28,58 +30,127 @@ def get_device(prefer: str = "cuda") -> torch.device:
     return torch.device("cpu")
 
 
-@torch.no_grad()
-def f_nonlinear(x: Tensor, u: Optional[Tensor]) -> Tensor:
-    """Nonlinear transition function f(x,u) -> x_next.
-
-    x: (B, n_x)
-    u: (B, n_u) or None
-    """
-    # Smooth nonlinearity with cross terms; coefficients chosen to be
-    # stable-ish
-    z = torch.tanh(x)
-    # Bounded quadratic-like term to avoid explosion
-    quad = 0.05 * torch.tanh(x * x)
-    mix = 0.01 * (
-        x @ torch.full((x.size(-1), x.size(-1)), 0.02, device=x.device)
-    )
-    x_next = 0.85 * x + z + quad + mix
-    if u is not None and u.numel() > 0:
-        Bu = 0.2 * u  # simple linear control influence
-        # pad/control to state dimension if needed
-        if Bu.size(-1) < x_next.size(-1):
-            pad = torch.zeros(
-                Bu.size(0), x_next.size(-1) - Bu.size(-1), device=x.device
-            )
-            Bu = torch.cat([Bu, pad], dim=-1)
-        elif Bu.size(-1) > x_next.size(-1):
-            Bu = Bu[..., : x_next.size(-1)]
-        x_next = x_next + Bu
-    return x_next
-
-
-@torch.no_grad()
-def g_nonlinear(x: Tensor, n_obs: int) -> Tensor:
-    """Nonlinear observation function g(x) -> y.
-
-    We map state to observations using sin/cos and linear heads.
-    """
-    s = torch.sin(x)
-    c = torch.cos(x)
-    feats = torch.cat([x, s, c], dim=-1)
-    # Random but fixed projection per call: use a simple deterministic map
-    # for reproducibility. Use the first n_obs columns of a normalized matrix.
-    # Stateless function: build a fixed tensor on the same device.
-    in_dim = feats.size(-1)
-    # Use a Hadamard-like random map seeded by device; fallback to
-    # normalized ones
-    W = torch.arange(
-        in_dim * n_obs, device=x.device, dtype=feats.dtype
-    ).reshape(in_dim, n_obs)
-    W = (W % 7 - 3).float()  # small integers in [-3,3]
-    W = W / (W.norm(dim=0, keepdim=True) + 1e-6)
-    y = feats @ W
-    return y
+class RandomSystemGenerator:
+    """Generates random nonlinear system functions f and g."""
+    
+    def __init__(self, n_state: int, n_obs: int, n_ctrl: int = 0, seed: Optional[int] = None):
+        self.n_state = n_state
+        self.n_obs = n_obs
+        self.n_ctrl = n_ctrl
+        self.rng = random.Random(seed)
+        
+        # Generate random parameters for f and g
+        self._generate_f_params()
+        self._generate_g_params()
+    
+    def _generate_f_params(self):
+        """Generate random parameters for transition function f."""
+        # Random combination of nonlinearities
+        self.f_linear_weight = self.rng.uniform(0.7, 0.95)  # Stability weight
+        self.f_tanh_weight = self.rng.uniform(0.1, 0.3)
+        self.f_sin_weight = self.rng.uniform(0.0, 0.2)
+        self.f_cos_weight = self.rng.uniform(0.0, 0.2)
+        self.f_quad_weight = self.rng.uniform(0.0, 0.1)
+        self.f_cubic_weight = self.rng.uniform(0.0, 0.05)
+        
+        # Random mixing matrix for cross terms
+        self.f_mix_weight = self.rng.uniform(0.0, 0.05)
+        self.f_mix_matrix = torch.randn(self.n_state, self.n_state) * 0.02
+        
+        # Control influence
+        self.f_control_weight = self.rng.uniform(0.1, 0.4)
+        if self.n_ctrl > 0:
+            self.f_control_matrix = torch.randn(self.n_state, self.n_ctrl) * 0.3
+    
+    def _generate_g_params(self):
+        """Generate random parameters for observation function g."""
+        # Random combination of transformations
+        self.g_linear_weight = self.rng.uniform(0.3, 0.8)
+        self.g_sin_weight = self.rng.uniform(0.0, 0.4)
+        self.g_cos_weight = self.rng.uniform(0.0, 0.4)
+        self.g_tanh_weight = self.rng.uniform(0.0, 0.3)
+        self.g_square_weight = self.rng.uniform(0.0, 0.2)
+        
+        # Random projection matrix
+        feature_dim = self.n_state * (1 + int(self.g_sin_weight > 0) + int(self.g_cos_weight > 0) + 
+                                    int(self.g_tanh_weight > 0) + int(self.g_square_weight > 0))
+        self.g_projection = torch.randn(feature_dim, self.n_obs) * 0.5
+        self.g_projection = self.g_projection / (self.g_projection.norm(dim=0, keepdim=True) + 1e-6)
+    
+    @torch.no_grad()
+    def f(self, x: Tensor, u: Optional[Tensor]) -> Tensor:
+        """Random nonlinear transition function f(x,u) -> x_next."""
+        x_next = self.f_linear_weight * x
+        
+        # Add various nonlinear terms
+        if self.f_tanh_weight > 0:
+            x_next += self.f_tanh_weight * torch.tanh(x)
+        
+        if self.f_sin_weight > 0:
+            x_next += self.f_sin_weight * torch.sin(x)
+        
+        if self.f_cos_weight > 0:
+            x_next += self.f_cos_weight * torch.cos(x)
+        
+        if self.f_quad_weight > 0:
+            x_next += self.f_quad_weight * torch.tanh(x * x)
+        
+        if self.f_cubic_weight > 0:
+            x_next += self.f_cubic_weight * torch.tanh(x * x * x)
+        
+        # Cross terms
+        if self.f_mix_weight > 0:
+            mix = x @ self.f_mix_matrix.to(x.device)
+            x_next += self.f_mix_weight * mix
+        
+        # Control input
+        if u is not None and u.numel() > 0:
+            if hasattr(self, 'f_control_matrix'):
+                Bu = self.f_control_weight * (u @ self.f_control_matrix.to(x.device).T)
+            else:
+                Bu = self.f_control_weight * u
+            
+            # Pad/truncate control to state dimension if needed
+            if Bu.size(-1) < x_next.size(-1):
+                pad = torch.zeros(Bu.size(0), x_next.size(-1) - Bu.size(-1), device=x.device)
+                Bu = torch.cat([Bu, pad], dim=-1)
+            elif Bu.size(-1) > x_next.size(-1):
+                Bu = Bu[..., :x_next.size(-1)]
+            x_next = x_next + Bu
+        
+        return x_next
+    
+    @torch.no_grad()
+    def g(self, x: Tensor) -> Tensor:
+        """Random nonlinear observation function g(x) -> y."""
+        features = []
+        
+        # Linear term
+        if self.g_linear_weight > 0:
+            features.append(self.g_linear_weight * x)
+        
+        # Nonlinear terms
+        if self.g_sin_weight > 0:
+            features.append(self.g_sin_weight * torch.sin(x))
+        
+        if self.g_cos_weight > 0:
+            features.append(self.g_cos_weight * torch.cos(x))
+        
+        if self.g_tanh_weight > 0:
+            features.append(self.g_tanh_weight * torch.tanh(x))
+        
+        if self.g_square_weight > 0:
+            features.append(self.g_square_weight * torch.tanh(x * x))
+        
+        # Combine features and project to observation space
+        if features:
+            feats = torch.cat(features, dim=-1)
+        else:
+            feats = x
+        
+        # Apply random projection
+        y = feats @ self.g_projection.to(x.device)
+        return y
 
 
 class NonlinearSystem:
@@ -91,6 +162,7 @@ class NonlinearSystem:
         process_noise_std: float = 0.05,
         meas_noise_std: float = 0.05,
         device: Optional[torch.device] = None,
+        seed: Optional[int] = None,
     ):
         self.n_state = n_state
         self.n_obs = n_obs
@@ -98,6 +170,14 @@ class NonlinearSystem:
         self.q = process_noise_std
         self.r = meas_noise_std
         self.device = device or get_device()
+        
+        # Generate random system functions
+        self.system_generator = RandomSystemGenerator(
+            n_state=n_state, 
+            n_obs=n_obs, 
+            n_ctrl=n_ctrl, 
+            seed=seed
+        )
 
     @torch.no_grad()
     def generate(
@@ -137,10 +217,10 @@ class NonlinearSystem:
             else:
                 u_t = None
 
-            x = f_nonlinear(x, u_t)
+            x = self.system_generator.f(x, u_t)
             if noisy and self.q > 0:
                 x = x + torch.randn_like(x) * self.q
-            y = g_nonlinear(x, self.n_obs)
+            y = self.system_generator.g(x)
             if noisy and self.r > 0:
                 y = y + torch.randn_like(y) * self.r
 
@@ -148,6 +228,37 @@ class NonlinearSystem:
             Y[:, t] = y
 
         return X, Y, U
+    
+    def regenerate_system(self, seed: Optional[int] = None):
+        """Regenerate the system with new random parameters."""
+        self.system_generator = RandomSystemGenerator(
+            n_state=self.n_state,
+            n_obs=self.n_obs, 
+            n_ctrl=self.n_ctrl,
+            seed=seed
+        )
+    
+    def get_system_info(self) -> Dict[str, Any]:
+        """Get information about the current random system parameters."""
+        return {
+            'f_params': {
+                'linear_weight': self.system_generator.f_linear_weight,
+                'tanh_weight': self.system_generator.f_tanh_weight,
+                'sin_weight': self.system_generator.f_sin_weight,
+                'cos_weight': self.system_generator.f_cos_weight,
+                'quad_weight': self.system_generator.f_quad_weight,
+                'cubic_weight': self.system_generator.f_cubic_weight,
+                'mix_weight': self.system_generator.f_mix_weight,
+                'control_weight': self.system_generator.f_control_weight,
+            },
+            'g_params': {
+                'linear_weight': self.system_generator.g_linear_weight,
+                'sin_weight': self.system_generator.g_sin_weight,
+                'cos_weight': self.system_generator.g_cos_weight,
+                'tanh_weight': self.system_generator.g_tanh_weight,
+                'square_weight': self.system_generator.g_square_weight,
+            }
+        }
 
 
 class NonlinearSequenceDataset(Dataset):
@@ -167,31 +278,36 @@ class NonlinearSequenceDataset(Dataset):
         self.random_controls = random_controls
         self.control_std = control_std
         self.noisy = noisy
+        
+        # Generate all trajectories at once for efficiency
+        print(f"Generating {num_traj} trajectories of length {horizon}...")
         if sys.n_ctrl > 0 and random_controls and control_std > 0:
-            self.Uall = (
+            Uall = (
                 torch.randn(num_traj, horizon, sys.n_ctrl, device=sys.device)
                 * control_std
             )
         else:
-            self.Uall = None
+            Uall = None
+            
+        # Generate all data in one batch
+        Xall, Yall, Uall = sys.generate(
+            horizon=horizon,
+            batch_size=num_traj,
+            noisy=noisy,
+            u_seq=Uall,
+        )
+        
+        # Store all data
+        self.Xall = Xall.cpu()
+        self.Yall = Yall.cpu()
+        self.Uall = Uall.cpu() if Uall is not None else None
+        print(f"Dataset generation complete!")
 
     def __len__(self) -> int:
         return self.num_traj
 
     def __getitem__(self, idx: int):
-        u_seq = None
-        if self.sys.n_ctrl > 0 and self.Uall is not None:
-            u_seq = self.Uall[idx: idx + 1].clone()
-        X, Y, U = self.sys.generate(
-            self.horizon,
-            batch_size=1,
-            noisy=self.noisy,
-            u_seq=u_seq,
-        )
-        X, Y = X.squeeze(0), Y.squeeze(0)
-        if U is not None:
-            U = U.squeeze(0)
-        result = {"x": X.cpu(), "y": Y.cpu()}
-        if U is not None:
-            result["u"] = U.cpu()
+        result = {"x": self.Xall[idx], "y": self.Yall[idx]}
+        if self.Uall is not None:
+            result["u"] = self.Uall[idx]
         return result

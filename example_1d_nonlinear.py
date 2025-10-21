@@ -12,14 +12,14 @@ from torch import nn
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
+from tqdm import tqdm
 
-from models import Filterformer, particle_filter_sequence
+from models import Filterformer, particle_filter_with_system
 from data.nonlinear_system import (
     NonlinearSystem,
     NonlinearSequenceDataset,
     get_device,
 )
-from data.nonlinear_system import g_nonlinear, f_nonlinear
 
 
 def set_seed(seed: int = 42) -> None:
@@ -37,7 +37,8 @@ def train_epoch(
     model.train()
     total_loss = 0.0
     n = 0
-    for batch in loader:
+    pbar = tqdm(loader, desc="Training", leave=False, position=1)
+    for batch in pbar:
         y = batch["y"].to(device)
         x = batch["x"].to(device)
         u = batch.get("u")
@@ -53,6 +54,9 @@ def train_epoch(
         optimizer.step()
         total_loss += loss.item() * y.size(0)
         n += y.size(0)
+        
+        # Update progress bar
+        pbar.set_postfix({'loss': f'{loss.item():.6f}'})
     return total_loss / max(1, n)
 
 
@@ -61,7 +65,8 @@ def eval_epoch(model, loader, device: torch.device):
     model.eval()
     total_loss = 0.0
     n = 0
-    for batch in loader:
+    pbar = tqdm(loader, desc="Validation", leave=False, position=1)
+    for batch in pbar:
         y = batch["y"].to(device)
         x = batch["x"].to(device)
         u = batch.get("u")
@@ -71,6 +76,9 @@ def eval_epoch(model, loader, device: torch.device):
         loss = nn.functional.mse_loss(x_hat, x)
         total_loss += loss.item() * y.size(0)
         n += y.size(0)
+        
+        # Update progress bar
+        pbar.set_postfix({'loss': f'{loss.item():.6f}'})
     return total_loss / max(1, n)
 
 
@@ -94,15 +102,11 @@ def visualize_1d(
             ub = None
         X_hat = model(yb, ub).squeeze(0)
         # Particle filter estimate for comparison
-        X_pf = particle_filter_sequence(
-            f_nonlinear,
-            g_nonlinear,
-            q_std=sys.q,
-            r_std=sys.r,
+        X_pf = particle_filter_with_system(
+            sys,
             Y=yb,
             num_particles=1024,
             U=ub,
-            n_obs=Y.shape[1],
             x0_mean=torch.zeros(1, 1, device=device),
             x0_std=1.0,
         ).squeeze(0)
@@ -149,7 +153,33 @@ def analyze_state_measurement_relationship_nl(sys: NonlinearSystem):
     """
     import numpy as np
 
-    print("Generating sample data for analysis...")
+    print("\n" + "="*80)
+    print("SYSTEM ANALYSIS")
+    print("="*80)
+    
+    # Display the actual random system parameters
+    sys_info = sys.get_system_info()
+    print("Random Nonlinear System Parameters:")
+    print("  Transition function f(x,u):")
+    f_params = sys_info['f_params']
+    print(f"    Linear weight: {f_params['linear_weight']:.4f}")
+    print(f"    Tanh weight: {f_params['tanh_weight']:.4f}")
+    print(f"    Sin weight: {f_params['sin_weight']:.4f}")
+    print(f"    Cos weight: {f_params['cos_weight']:.4f}")
+    print(f"    Quadratic weight: {f_params['quad_weight']:.4f}")
+    print(f"    Cubic weight: {f_params['cubic_weight']:.4f}")
+    print(f"    Mix weight: {f_params['mix_weight']:.4f}")
+    print(f"    Control weight: {f_params['control_weight']:.4f}")
+    
+    print("  Observation function g(x):")
+    g_params = sys_info['g_params']
+    print(f"    Linear weight: {g_params['linear_weight']:.4f}")
+    print(f"    Sin weight: {g_params['sin_weight']:.4f}")
+    print(f"    Cos weight: {g_params['cos_weight']:.4f}")
+    print(f"    Tanh weight: {g_params['tanh_weight']:.4f}")
+    print(f"    Square weight: {g_params['square_weight']:.4f}")
+
+    print("\nGenerating fresh sample data for analysis...")
 
     X_true, Y, U = sys.generate(horizon=20, batch_size=1, noisy=True)
     X_true = X_true.squeeze(0).cpu()
@@ -161,7 +191,7 @@ def analyze_state_measurement_relationship_nl(sys: NonlinearSystem):
 
     # Expected noiseless measurements via g(x)
     with torch.no_grad():
-        Y_expected = g_nonlinear(X_true, n_obs=Y.shape[1]).cpu().numpy()
+        Y_expected = sys.system_generator.g(X_true).cpu().numpy()
 
     X_np = X_true.numpy().flatten()
     Y_np = Y.numpy()
@@ -241,7 +271,8 @@ def eval_with_particle_filter(
     total_mse_tr = 0.0
     total_mse_pf = 0.0
     count = 0
-    for batch in loader:
+    pbar = tqdm(loader, desc="Evaluating vs Particle Filter", leave=False, position=1)
+    for batch in pbar:
         y = batch["y"].to(device)
         x_true = batch["x"].to(device)
         u = batch.get("u")
@@ -251,25 +282,25 @@ def eval_with_particle_filter(
         x_tr = model(y, u)
         # Particle filter
         x0_mean = torch.zeros(y.size(0), x_true.size(-1), device=device)
-        x_pf = particle_filter_sequence(
-            f_nonlinear,
-            g_nonlinear,
-            q_std=sys.q,
-            r_std=sys.r,
+        x_pf = particle_filter_with_system(
+            sys,
             Y=y,
             num_particles=1024,
             U=u,
-            n_obs=y.size(-1),
             x0_mean=x0_mean,
             x0_std=1.0,
         )
-        total_mse_tr += nn.functional.mse_loss(
-            x_tr, x_true, reduction="sum"
-        ).item()
-        total_mse_pf += nn.functional.mse_loss(
-            x_pf, x_true, reduction="sum"
-        ).item()
+        mse_tr = nn.functional.mse_loss(x_tr, x_true, reduction="sum").item()
+        mse_pf = nn.functional.mse_loss(x_pf, x_true, reduction="sum").item()
+        total_mse_tr += mse_tr
+        total_mse_pf += mse_pf
         count += x_true.numel()
+        
+        # Update progress bar
+        pbar.set_postfix({
+            'Filterformer MSE': f'{mse_tr/count:.6f}',
+            'Particle Filter MSE': f'{mse_pf/count:.6f}'
+        })
     return total_mse_tr / max(1, count), total_mse_pf / max(1, count)
 
 
@@ -281,31 +312,26 @@ def main():
         "--horizon", type=int, default=64, help="Sequence length"
     )
     parser.add_argument(
-        "--train_traj", type=int, default=4000, help="# training sequences"
+        "--train_traj", type=int, default=40000, help="# training sequences"
     )
     parser.add_argument(
-        "--val_traj", type=int, default=800, help="# validation sequences"
+        "--val_traj", type=int, default=10000, help="# validation sequences"
     )
     parser.add_argument(
-        "--epochs", type=int, default=15, help="Max epochs"
+        "--epochs", type=int, default=20, help="Max epochs"
     )
     parser.add_argument(
         "--batch_size", type=int, default=64, help="Batch size"
     )
     parser.add_argument(
-        "--noise_std", type=float, default=0.10, help="Process/Meas noise std"
+        "--noise_std", type=float, default=0.05, help="Process/Meas noise std"
     )
     parser.add_argument("--lr", type=float, default=2e-3, help="Learning rate")
     parser.add_argument(
         "--patience", type=int, default=3, help="Early stopping patience"
     )
     parser.add_argument(
-        "--use_pos_encoding",
-        action="store_true",
-        help="Use positional encoding",
-    )
-    parser.add_argument(
-        "--layers", type=int, default=4, help="# Transformer layers"
+        "--layers", type=int, default=2, help="# Transformer layers"
     )
     parser.add_argument(
         "--d_model", type=int, default=128, help="Model dimension"
@@ -369,7 +395,6 @@ def main():
     cfg_like.n_heads = args.n_heads
     cfg_like.dropout = 0.1
     cfg_like.max_len = max(1024, args.horizon)
-    cfg_like.use_positional_encoding = args.use_pos_encoding
 
     model = Filterformer(
         n_obs=n_obs,
@@ -392,21 +417,16 @@ def main():
     print(f"  Layers: {args.layers}")
     print(f"  d_model: {args.d_model}")
     print(f"  n_heads: {args.n_heads}")
-    print(f"  Positional encoding: {args.use_pos_encoding}")
-    print(
-        f"  Model parameters: "
-        f"{sum(p.numel() for p in model.parameters()):,}"
-    )
-    print()
-    print("Nonlinear system (1D state, 2D observation):")
-    print("  State update:")
-    print(
-        "    x_{t+1} = 0.85 x_t + tanh(x_t) + 0.05*tanh(x_t^2) "
-    )
-    print("              + 0.01*C x_t + B u_t + w_t")
-    print("    (C has entries 0.02; u_t omitted when n_ctrl=0)")
-    print("  Observation:")
-    print("    y_t = W [x_t, sin(x_t), cos(x_t)] + v_t")
+    print(f"  Positional encoding: True (always enabled)")
+    
+    # Calculate and display parameter-to-data ratio
+    total_params = sum(p.numel() for p in model.parameters())
+    total_data_points = args.train_traj * args.horizon
+    param_data_ratio = total_data_points / total_params
+    
+    print(f"  Model parameters: {total_params:,}")
+    print(f"  Training data points: {total_data_points:,}")
+    print(f"  Data-to-parameter ratio: {param_data_ratio:.1f}x")
 
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=1e-2
@@ -423,7 +443,9 @@ def main():
         f"{'Best Val MSE':<12} | {'Status':<15}"
     )
     print("-" * 80)
-    for epoch in range(1, args.epochs + 1):
+    
+    epoch_pbar = tqdm(range(1, args.epochs + 1), desc="Training Epochs", position=0, leave=True)
+    for epoch in epoch_pbar:
         tr = train_epoch(model, train_loader, optimizer, device)
         val = eval_epoch(model, val_loader, device)
         is_best = val < best_val
@@ -434,12 +456,23 @@ def main():
         else:
             patience_counter += 1
             status = f"Patience: {patience_counter}/{args.patience}"
-        print(
+        
+        # Update epoch progress bar
+        epoch_pbar.set_postfix({
+            'Train MSE': f'{tr:.6f}',
+            'Val MSE': f'{val:.6f}',
+            'Best Val MSE': f'{best_val:.6f}',
+            'Status': status
+        })
+        
+        # Print above the progress bar
+        tqdm.write(
             f"{epoch:6d} | {tr:10.6f} | {val:10.6f} | {best_val:12.6f} | "
             f"{status:<15}"
         )
-        if patience_counter >= args.patience:
-            print("Early stopping (patience exceeded)")
+        # Don't early stop for the first 5 epochs
+        if patience_counter >= args.patience and epoch >= 5:
+            tqdm.write("Early stopping (patience exceeded)")
             break
 
     # Final evaluation (match example_1d.py style)

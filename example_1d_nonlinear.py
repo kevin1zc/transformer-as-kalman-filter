@@ -115,7 +115,10 @@ def visualize_1d(
     x_true = X_true.cpu().numpy().flatten()
     x_hat = X_hat.cpu().numpy().flatten()
     x_pf = X_pf.cpu().numpy().flatten()
-    y_np = Y.cpu().numpy()
+    
+    # Calculate MSE at each time step
+    mse_filterformer = (x_true - x_hat) ** 2
+    mse_particle_filter = (x_true - x_pf) ** 2
 
     plt.figure(figsize=(12, 8))
 
@@ -130,15 +133,13 @@ def visualize_1d(
     plt.legend()
     plt.grid(True, alpha=0.3)
 
-    # Bottom: observations
+    # Bottom: MSE comparison
     plt.subplot(2, 1, 2)
-    for i in range(y_np.shape[1]):
-        plt.plot(
-            steps, y_np[:, i], label=f"Measurement Channel {i+1}", alpha=0.7
-        )
+    plt.plot(steps, mse_filterformer, "b--", label="Filterformer MSE", linewidth=2)
+    plt.plot(steps, mse_particle_filter, "r:", label="Particle Filter MSE", linewidth=2)
     plt.xlabel("Time Step")
-    plt.ylabel("Measurement Value")
-    plt.title("Noisy Measurements (Observations)")
+    plt.ylabel("Mean Squared Error")
+    plt.title("MSE Comparison Over Time")
     plt.legend()
     plt.grid(True, alpha=0.3)
 
@@ -482,7 +483,7 @@ def main():
     tr_mse, pf_mse = eval_with_particle_filter(
         model, val_loader, sys, device=device
     )
-    print("Validation MSE vs Ground Truth:")
+    print("\nValidation MSE vs Ground Truth:")
     print(f"  Filterformer: {tr_mse:.6f}")
     print(f"  Particle Filter: {pf_mse:.6f}")
     if pf_mse > 0:

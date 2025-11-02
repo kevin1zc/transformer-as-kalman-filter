@@ -2,18 +2,16 @@
 Configuration package for Transformer Kalman Filter experiment.
 """
 
-from .config import (
-    LDSConfig,
-    TransformerConfig,
+from .model_config import (
+    OneLayerTransformerConfig,
+    FilterformerConfig,
     GRUConfig,
-    TrainingConfig,
-    ExperimentConfig,
+    LTCConfig,
 )
 
 __all__ = [
-    "LDSConfig",
-    "TransformerConfig",
+    "OneLayerTransformerConfig",
+    "FilterformerConfig",
     "GRUConfig",
-    "TrainingConfig",
-    "ExperimentConfig",
+    "LTCConfig",
 ]

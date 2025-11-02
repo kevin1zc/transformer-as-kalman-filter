@@ -42,15 +42,12 @@ class SimpleLinearSystemDataset(DynamicSystemDataset):
             B: (num_systems, n_state, n_ctrl) or None B matrices
             H: (num_systems, n_obs, n_state) H matrices
         """
-        # Generate random A matrices
+        # Generate random stable A matrices (spectral radius scaled)
         A = torch.randn(num_systems, n_state, n_state, device=device)
-
-        # Make each A stable by scaling spectral radius
         with torch.no_grad():
             for i in range(num_systems):
                 u, s, v = torch.linalg.svd(A[i])
-                s = s / s.max() * stable_radius
-                A[i] = u @ torch.diag(s) @ v
+                A[i] = u @ torch.diag(s * stable_radius / s.max()) @ v
 
         # Generate B matrices if needed
         B = None
@@ -110,13 +107,14 @@ class SimpleLinearSystemDataset(DynamicSystemDataset):
                 x = x.unsqueeze(0).expand(Bsz, -1)
 
         for t in range(horizon):
-            # State update: x_i = x_i @ A_i^T + u_t @ B_i^T
+            # State update: x = x @ A + u @ B
             x = torch.einsum("bi,bij->bj", x, A)
             if B is not None:
-                if u_seq is None:
-                    u_t = torch.zeros(Bsz, n_ctrl, device=device)
-                else:
-                    u_t = u_seq[:, t]
+                u_t = (
+                    torch.zeros(Bsz, n_ctrl, device=device)
+                    if u_seq is None
+                    else u_seq[:, t]
+                )
                 x = x + torch.einsum("bi,bij->bj", u_t, B)
                 if U is not None:
                     U[:, t] = u_t
@@ -124,13 +122,12 @@ class SimpleLinearSystemDataset(DynamicSystemDataset):
             if noisy and process_noise_std > 0:
                 x = x + torch.randn_like(x) * process_noise_std
 
-            # Observation: y_i = H_i @ x_i
+            # Observation: y = H @ x
             y = torch.einsum("bij,bj->bi", H, x)
             if noisy and meas_noise_std > 0:
                 y = y + torch.randn_like(y) * meas_noise_std
 
-            X[:, t] = x
-            Y[:, t] = y
+            X[:, t], Y[:, t] = x, y
 
         return X, Y, U
 
@@ -151,34 +148,28 @@ class SimpleLinearSystemDataset(DynamicSystemDataset):
         device: Optional[torch.device] = None,
         seed: Optional[int] = None,
     ):
-        # Initialize base class
         super().__init__(
-            num_distinct_systems=num_distinct_systems,
-            num_traj_per_system=num_traj_per_system,
-            horizon=horizon,
-            n_state=n_state,
-            n_obs=n_obs,
-            n_ctrl=n_ctrl,
-            random_controls=random_controls,
-            control_std=control_std,
-            noisy=noisy,
-            device=device,
-            seed=seed,
+            num_distinct_systems,
+            num_traj_per_system,
+            horizon,
+            n_state,
+            n_obs,
+            n_ctrl,
+            random_controls,
+            control_std,
+            noisy,
+            device,
+            seed,
             data_name="linear trajectories",
         )
+        self.process_noise_std, self.meas_noise_std, self.stable_radius = (
+            process_noise_std,
+            meas_noise_std,
+            stable_radius,
+        )
 
-        self.process_noise_std = process_noise_std
-        self.meas_noise_std = meas_noise_std
-        self.stable_radius = stable_radius
-
-        # Generate all random system parameters at once
         A, B, H = self._generate_random_systems(
-            num_systems=num_distinct_systems,
-            n_state=n_state,
-            n_obs=n_obs,
-            n_ctrl=n_ctrl,
-            stable_radius=stable_radius,
-            device=self.device,
+            num_distinct_systems, n_state, n_obs, n_ctrl, stable_radius, self.device
         )
 
         # Pre-generate controls if needed
@@ -196,29 +187,32 @@ class SimpleLinearSystemDataset(DynamicSystemDataset):
         else:
             U_per_sys = None
 
-        # Generate all trajectories at once
-        # Repeat each system num_traj_per_system times
+        # Repeat each system num_traj_per_system times for batched generation
         A_repeated = A.repeat_interleave(num_traj_per_system, dim=0)
         B_repeated = (
             B.repeat_interleave(num_traj_per_system, dim=0) if B is not None else None
         )
         H_repeated = H.repeat_interleave(num_traj_per_system, dim=0)
-
-        # Reshape U from (num_sys, num_traj_per_sys, horizon, n_ctrl) to (num_traj, horizon, n_ctrl)
-        U_for_generate = None
-        if U_per_sys is not None:
-            U_for_generate = U_per_sys.reshape(self.num_traj, horizon, n_ctrl)
+        U_for_generate = (
+            U_per_sys.reshape(self.num_traj, horizon, n_ctrl)
+            if U_per_sys is not None
+            else None
+        )
 
         X, Y, _ = self._generate_trajectories(
-            A=A_repeated,
-            B=B_repeated,
-            H=H_repeated,
-            horizon=horizon,
-            process_noise_std=process_noise_std,
-            meas_noise_std=meas_noise_std,
-            u_seq=U_for_generate,
+            A_repeated,
+            B_repeated,
+            H_repeated,
+            horizon,
+            process_noise_std,
+            meas_noise_std,
+            U_for_generate,
             noisy=noisy,
         )
 
-        # Store all data on CPU
         self._store_data(X, Y, U_for_generate)
+        self.A_all, self.H_all, self.B_all = (
+            A.cpu(),
+            H.cpu(),
+            (B.cpu() if B is not None else None),
+        )

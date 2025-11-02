@@ -78,7 +78,7 @@ class SimpleNonlinearSystemDataset(DynamicSystemDataset):
         u_seq: Optional[Tensor] = None,
         noisy: bool = True,
         device: Optional[torch.device] = None,
-    ) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
+    ) -> Tuple[Tensor, Tensor, Optional[Tensor], Tensor]:
         """Generate trajectories for a single system with multiple trajectories."""
         batch_size = u_seq.size(0) if u_seq is not None else 1
 
@@ -120,15 +120,21 @@ class SimpleNonlinearSystemDataset(DynamicSystemDataset):
 
             # Add control input
             if u_t is not None:
-                if "control_matrix" in f_params:
-                    Bu = f_params["control"] * (u_t @ f_params["control_matrix"].T)
-                else:
-                    Bu = f_params["control"] * u_t
-                if Bu.size(-1) < n_state:
-                    pad = torch.zeros(Bu.size(0), n_state - Bu.size(-1), device=device)
-                    Bu = torch.cat([Bu, pad], dim=-1)
-                elif Bu.size(-1) > n_state:
-                    Bu = Bu[:, :n_state]
+                Bu = f_params["control"] * (
+                    u_t @ f_params["control_matrix"].T
+                    if "control_matrix" in f_params
+                    else u_t
+                )
+                if Bu.size(-1) != n_state:
+                    Bu = torch.cat(
+                        [
+                            Bu,
+                            torch.zeros(
+                                Bu.size(0), max(0, n_state - Bu.size(-1)), device=device
+                            ),
+                        ],
+                        dim=-1,
+                    )[:, :n_state]
                 x_next = x_next + Bu
 
             if noisy and process_noise_std > 0:
@@ -147,20 +153,16 @@ class SimpleNonlinearSystemDataset(DynamicSystemDataset):
             if g_active["square"]:
                 features.append(g_params["square"] * torch.tanh(x_next * x_next))
 
-            feats = torch.cat(features, dim=-1)
-            y = feats @ g_proj
-
+            y = torch.cat(features, dim=-1) @ g_proj
             if noisy and meas_noise_std > 0:
                 y = y + torch.randn_like(y) * meas_noise_std
 
-            X[:, t] = x_next
-            Y[:, t] = y
+            X[:, t], Y[:, t] = x_next, y
             if U is not None and u_t is not None:
                 U[:, t] = u_t
-
             x = x_next
 
-        return X, Y, U
+        return X, Y, U, g_proj
 
     def __init__(
         self,
@@ -179,32 +181,27 @@ class SimpleNonlinearSystemDataset(DynamicSystemDataset):
         seed: Optional[int] = None,
     ):
         super().__init__(
-            num_distinct_systems=num_distinct_systems,
-            num_traj_per_system=num_traj_per_system,
-            horizon=horizon,
-            n_state=n_state,
-            n_obs=n_obs,
-            n_ctrl=n_ctrl,
-            random_controls=random_controls,
-            control_std=control_std,
-            noisy=noisy,
-            device=device,
-            seed=seed,
+            num_distinct_systems,
+            num_traj_per_system,
+            horizon,
+            n_state,
+            n_obs,
+            n_ctrl,
+            random_controls,
+            control_std,
+            noisy,
+            device,
+            seed,
             data_name="nonlinear trajectories",
         )
+        self.process_noise_std, self.meas_noise_std = process_noise_std, meas_noise_std
 
-        self.process_noise_std = process_noise_std
-        self.meas_noise_std = meas_noise_std
-
-        # Generate all system parameters at once
         f_params_all, g_params_all = self._generate_random_system_params_batch(
-            num_systems=num_distinct_systems,
-            n_state=n_state,
-            n_ctrl=n_ctrl,
-            device=self.device,
+            num_distinct_systems, n_state, n_ctrl, self.device
         )
 
         # Pre-generate controls if needed
+        # Generate controls for batch_size even if n_ctrl=0 (to control batch size)
         if n_ctrl > 0 and random_controls and control_std > 0:
             U_per_sys = (
                 torch.randn(
@@ -216,13 +213,21 @@ class SimpleNonlinearSystemDataset(DynamicSystemDataset):
                 )
                 * control_std
             )
+        elif n_ctrl == 0:
+            # Generate dummy controls to control batch size (will be ignored in generation)
+            U_per_sys = torch.zeros(
+                num_distinct_systems,
+                num_traj_per_system,
+                horizon,
+                1,
+                device=self.device,
+            )
         else:
             U_per_sys = None
 
         # Generate trajectories for each system
-        X_list, Y_list, U_list = [], [], []
+        X_list, Y_list, U_list, g_proj_list = [], [], [], []
         for sys_idx in range(num_distinct_systems):
-            # Extract this system's parameters
             f_params = {
                 k: v[sys_idx] if v.dim() == 1 else v[sys_idx]
                 for k, v in f_params_all.items()
@@ -233,29 +238,30 @@ class SimpleNonlinearSystemDataset(DynamicSystemDataset):
                 f_params["control_matrix"] = f_params_all["control_matrix"][sys_idx]
 
             u_seq = U_per_sys[sys_idx] if U_per_sys is not None else None
-
-            # Generate all trajectories for this system at once
-            X_sys, Y_sys, U_sys = self._generate_single_system_trajectories(
-                f_params=f_params,
-                g_params=g_params,
-                n_state=n_state,
-                n_obs=n_obs,
-                n_ctrl=n_ctrl,
-                horizon=horizon,
-                process_noise_std=process_noise_std,
-                meas_noise_std=meas_noise_std,
-                u_seq=u_seq,
+            X_sys, Y_sys, U_sys, g_proj = self._generate_single_system_trajectories(
+                f_params,
+                g_params,
+                n_state,
+                n_obs,
+                n_ctrl,
+                horizon,
+                process_noise_std,
+                meas_noise_std,
+                u_seq,
                 noisy=noisy,
                 device=self.device,
             )
-
             X_list.append(X_sys)
             Y_list.append(Y_sys)
             U_list.append(U_sys if U_sys is not None else None)
+            g_proj_list.append(g_proj)
 
-        # Concatenate and store all trajectories
-        X_all = torch.cat(X_list, dim=0)
-        Y_all = torch.cat(Y_list, dim=0)
+        X_all, Y_all = torch.cat(X_list, dim=0), torch.cat(Y_list, dim=0)
         U_all = torch.cat(U_list, dim=0) if any(u is not None for u in U_list) else None
 
         self._store_data(X_all, Y_all, U_all)
+        self.f_params_all, self.g_params_all, self.g_proj_all = (
+            f_params_all,
+            g_params_all,
+            g_proj_list,
+        )

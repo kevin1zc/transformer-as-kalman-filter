@@ -100,3 +100,7 @@ class DynamicSystemDataset(Dataset):
         if self.Uall is not None:
             result["u"] = self.Uall[idx]
         return result
+
+    def get_system_idx(self, idx: int) -> int:
+        """Get the system index for a given trajectory index."""
+        return idx // self.num_traj_per_system

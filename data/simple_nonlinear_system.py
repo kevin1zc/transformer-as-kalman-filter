@@ -1,16 +1,18 @@
 """
-Simple Nonlinear System implementation.
+Nonlinear Dynamical System Dataset.
 
-Implements a discrete-time nonlinear state space model with optional controls:
+Implements discrete-time nonlinear state-space model:
     x_{t+1} = f(x_t, u_t) + w_t
-    y_t     = g(x_t) + v_t
+    y_t = g(x_t) + v_t
 
-The system functions f and g are randomly generated for each system instance,
-providing diverse nonlinear dynamics for testing. Each system uses:
-  - f: Random combination of nonlinearities (tanh, sin, cos, polynomials)
-  - g: Random observation mapping with various transformations
+where f and g are randomly generated nonlinear functions composed of:
+  - Transition f: linear, tanh, sin, cos, quadratic, cubic, and mixed terms
+  - Observation g: linear, sin, cos, tanh, and squared transformations
 
-Noise w_t and v_t are Gaussian with user-specified standard deviations.
+Each system uses different randomly sampled weights for nonlinear components,
+ensuring diverse dynamics. Noise w_t and v_t are independent Gaussian processes.
+Generates multiple trajectories from a single system instance with different
+initial conditions and noise realizations.
 """
 
 from __future__ import annotations
@@ -20,47 +22,79 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-from data.base_system import DynamicSystemDataset, get_device
+from data.base_system import DynamicSystemDataset, get_device, make_controls
 
 
 class SimpleNonlinearSystemDataset(DynamicSystemDataset):
-    """Nonlinear dynamic system dataset with random systems per sample."""
+    """Nonlinear state-space system dataset.
+
+    Generates trajectories from a single nonlinear system with randomly generated
+    transition and observation functions. All trajectories share the same system
+    dynamics but have different noise realizations and initial conditions.
+
+    Attributes:
+        f_params: Transition function parameters (dict)
+        g_params: Observation function parameters (dict)
+        g_proj: Observation projection matrix (feature_dim, n_obs)
+        process_noise_std: Process noise standard deviation
+        meas_noise_std: Measurement noise standard deviation
+    """
 
     @staticmethod
-    def _generate_random_system_params_batch(
-        num_systems: int,
+    def _generate_single_system_params(
         n_state: int,
         n_ctrl: int,
         device: Optional[torch.device] = None,
     ) -> Tuple[dict, dict]:
-        """Generate random system parameters for all systems at once."""
+        """Generate random nonlinear system parameters.
+
+        Args:
+            n_state: State dimension
+            n_ctrl: Control dimension (0 if uncontrolled)
+            device: PyTorch device
+
+        Returns:
+            Tuple of (f_params, g_params) dictionaries containing:
+                f_params: Transition function weights (linear, nonlinear terms)
+                g_params: Observation function weights (linear, nonlinear terms)
+        """
         device = device or get_device()
 
-        # f parameters: transition function weights
+        # Transition function f: Create TRULY dynamic nonlinear system
+        # Key: Strong oscillations + moderate polynomials + damping to prevent drift
         f_params = {
-            "linear": torch.rand(num_systems, device=device) * 0.25 + 0.7,  # 0.7-0.95
-            "tanh": torch.rand(num_systems, device=device) * 0.2 + 0.1,  # 0.1-0.3
-            "sin": torch.rand(num_systems, device=device) * 0.2,  # 0.0-0.2
-            "cos": torch.rand(num_systems, device=device) * 0.2,  # 0.0-0.2
-            "quad": torch.rand(num_systems, device=device) * 0.1,  # 0.0-0.1
-            "cubic": torch.rand(num_systems, device=device) * 0.05,  # 0.0-0.05
-            "mix": torch.rand(num_systems, device=device) * 0.05,  # 0.0-0.05
-            "mix_matrix": torch.randn(num_systems, n_state, n_state, device=device)
-            * 0.02,
-            "control": torch.rand(num_systems, device=device) * 0.3 + 0.1,  # 0.1-0.4
+            "linear": torch.rand(1, device=device)[0] * 0.15
+            + 0.15,  # 0.15-0.30 (weak persistence)
+            "sin": torch.rand(1, device=device)[0] * 0.8
+            + 0.8,  # 0.8-1.6 (STRONG oscillation)
+            "cos": torch.rand(1, device=device)[0] * 0.8
+            + 0.8,  # 0.8-1.6 (STRONG oscillation)
+            "tanh": torch.rand(1, device=device)[0] * 0.4 + 0.3,  # 0.3-0.7 (saturation)
+            "quad": torch.rand(1, device=device)[0] * 0.2
+            + 0.1,  # 0.1-0.3 (moderate quadratic)
+            "cubic": torch.rand(1, device=device)[0] * 0.15
+            + 0.05,  # 0.05-0.20 (small cubic)
+            "mix": torch.rand(1, device=device)[0] * 0.3
+            + 0.2,  # 0.2-0.5 (state coupling)
+            "mix_matrix": torch.randn(n_state, n_state, device=device) * 0.3,
+            "control": torch.rand(1, device=device)[0] * 0.3 + 0.1,
+            "damping": torch.rand(1, device=device)[0] * 0.15
+            + 0.10,  # 0.10-0.25 (stronger damping)
+            "centering": torch.rand(1, device=device)[0] * 0.05
+            + 0.02,  # 0.02-0.07 (pull toward zero)
         }
         if n_ctrl > 0:
             f_params["control_matrix"] = (
-                torch.randn(num_systems, n_state, n_ctrl, device=device) * 0.3
+                torch.randn(n_state, n_ctrl, device=device) * 0.3
             )
 
-        # g parameters: observation function weights
+        # Observation function g: More nonlinear observations
         g_params = {
-            "linear": torch.rand(num_systems, device=device) * 0.5 + 0.3,  # 0.3-0.8
-            "sin": torch.rand(num_systems, device=device) * 0.4,  # 0.0-0.4
-            "cos": torch.rand(num_systems, device=device) * 0.4,  # 0.0-0.4
-            "tanh": torch.rand(num_systems, device=device) * 0.3,  # 0.0-0.3
-            "square": torch.rand(num_systems, device=device) * 0.2,  # 0.0-0.2
+            "linear": torch.rand(1, device=device)[0] * 0.4 + 0.3,  # 0.3-0.7
+            "sin": torch.rand(1, device=device)[0] * 0.8 + 0.4,  # 0.4-1.2 (stronger)
+            "cos": torch.rand(1, device=device)[0] * 0.8 + 0.4,  # 0.4-1.2 (stronger)
+            "tanh": torch.rand(1, device=device)[0] * 0.6 + 0.3,  # 0.3-0.9 (stronger)
+            "square": torch.rand(1, device=device)[0] * 0.5 + 0.3,  # 0.3-0.8 (stronger)
         }
 
         return f_params, g_params
@@ -79,10 +113,31 @@ class SimpleNonlinearSystemDataset(DynamicSystemDataset):
         noisy: bool = True,
         device: Optional[torch.device] = None,
     ) -> Tuple[Tensor, Tensor, Optional[Tensor], Tensor]:
-        """Generate trajectories for a single system with multiple trajectories."""
+        """Generate multiple trajectories from a single nonlinear system.
+
+        Args:
+            f_params: Transition function parameters (dict)
+            g_params: Observation function parameters (dict)
+            n_state: State dimension
+            n_obs: Observation dimension
+            n_ctrl: Control dimension
+            horizon: Number of time steps per trajectory
+            process_noise_std: Process noise standard deviation
+            meas_noise_std: Measurement noise standard deviation
+            u_seq: Control sequences (num_traj, horizon, n_ctrl) or None
+            noisy: Whether to add Gaussian noise
+            device: PyTorch device
+
+        Returns:
+            Tuple of (X, Y, U, g_proj) where:
+                X: (num_traj, horizon, n_state) true states
+                Y: (num_traj, horizon, n_obs) noisy observations
+                U: (num_traj, horizon, n_ctrl) controls or None
+                g_proj: (feature_dim, n_obs) observation projection matrix
+        """
         batch_size = u_seq.size(0) if u_seq is not None else 1
 
-        # Build g projection matrix
+        # Construct observation projection matrix from active g features
         g_active = {
             k: g_params[k] > 0 for k in ["linear", "sin", "cos", "tanh", "square"]
         }
@@ -98,25 +153,41 @@ class SimpleNonlinearSystemDataset(DynamicSystemDataset):
             else None
         )
 
-        x = torch.randn(batch_size, n_state, device=device)
+        # Start with diverse initial states in a reasonable range
+        x = torch.randn(batch_size, n_state, device=device) * 1.5
 
         for t in range(horizon):
             u_t = u_seq[:, t] if u_seq is not None and n_ctrl > 0 else None
 
-            # Apply transition function f
+            # Apply TRULY NONLINEAR transition function f
+            # Design: Strong oscillations for dynamics + restoring forces for stability
             x_next = f_params["linear"] * x
-            if f_params["tanh"] > 0:
-                x_next += f_params["tanh"] * torch.tanh(x)
+
+            # Strong oscillatory terms (create rich dynamics)
             if f_params["sin"] > 0:
-                x_next += f_params["sin"] * torch.sin(x)
+                x_next = x_next + f_params["sin"] * torch.sin(x * 2.5)
             if f_params["cos"] > 0:
-                x_next += f_params["cos"] * torch.cos(x)
+                x_next = x_next + f_params["cos"] * torch.cos(x * 2.5)
+
+            # Saturation for boundedness
+            if f_params["tanh"] > 0:
+                x_next = x_next + f_params["tanh"] * torch.tanh(x * 1.5)
+
+            # Moderate polynomial terms (clipped to prevent explosion)
             if f_params["quad"] > 0:
-                x_next += f_params["quad"] * torch.tanh(x * x)
+                x_next = x_next + f_params["quad"] * torch.clamp(x * x, -3, 3)
             if f_params["cubic"] > 0:
-                x_next += f_params["cubic"] * torch.tanh(x * x * x)
+                x_next = x_next + f_params["cubic"] * torch.clamp(x * x * x, -3, 3)
+
+            # State coupling (cross-dimensional interactions)
             if f_params["mix"] > 0:
-                x_next += f_params["mix"] * (x @ f_params["mix_matrix"].T)
+                x_next = x_next + f_params["mix"] * (x @ f_params["mix_matrix"].T)
+
+            # Restoring forces (prevent drift and explosion)
+            if f_params["damping"] > 0:
+                x_next = x_next - f_params["damping"] * x_next  # Velocity damping
+            if f_params["centering"] > 0:
+                x_next = x_next - f_params["centering"] * x  # Pull toward origin
 
             # Add control input
             if u_t is not None:
@@ -169,8 +240,7 @@ class SimpleNonlinearSystemDataset(DynamicSystemDataset):
         n_state: int,
         n_obs: int,
         n_ctrl: int,
-        num_distinct_systems: int,
-        num_traj_per_system: int,
+        num_traj: int,
         horizon: int,
         process_noise_std: float,
         meas_noise_std: float,
@@ -181,8 +251,7 @@ class SimpleNonlinearSystemDataset(DynamicSystemDataset):
         seed: Optional[int] = None,
     ):
         super().__init__(
-            num_distinct_systems,
-            num_traj_per_system,
+            num_traj,
             horizon,
             n_state,
             n_obs,
@@ -196,72 +265,31 @@ class SimpleNonlinearSystemDataset(DynamicSystemDataset):
         )
         self.process_noise_std, self.meas_noise_std = process_noise_std, meas_noise_std
 
-        f_params_all, g_params_all = self._generate_random_system_params_batch(
-            num_distinct_systems, n_state, n_ctrl, self.device
+        f_params, g_params = self._generate_single_system_params(
+            n_state, n_ctrl, self.device
         )
 
-        # Pre-generate controls if needed
-        # Generate controls for batch_size even if n_ctrl=0 (to control batch size)
-        if n_ctrl > 0 and random_controls and control_std > 0:
-            U_per_sys = (
-                torch.randn(
-                    num_distinct_systems,
-                    num_traj_per_system,
-                    horizon,
-                    n_ctrl,
-                    device=self.device,
-                )
-                * control_std
-            )
-        elif n_ctrl == 0:
-            # Generate dummy controls to control batch size (will be ignored in generation)
-            U_per_sys = torch.zeros(
-                num_distinct_systems,
-                num_traj_per_system,
-                horizon,
-                1,
-                device=self.device,
-            )
-        else:
-            U_per_sys = None
-
-        # Generate trajectories for each system
-        X_list, Y_list, U_list, g_proj_list = [], [], [], []
-        for sys_idx in range(num_distinct_systems):
-            f_params = {
-                k: v[sys_idx] if v.dim() == 1 else v[sys_idx]
-                for k, v in f_params_all.items()
-            }
-            g_params = {k: v[sys_idx] for k, v in g_params_all.items()}
-            f_params["mix_matrix"] = f_params_all["mix_matrix"][sys_idx]
-            if "control_matrix" in f_params_all:
-                f_params["control_matrix"] = f_params_all["control_matrix"][sys_idx]
-
-            u_seq = U_per_sys[sys_idx] if U_per_sys is not None else None
-            X_sys, Y_sys, U_sys, g_proj = self._generate_single_system_trajectories(
-                f_params,
-                g_params,
-                n_state,
-                n_obs,
-                n_ctrl,
-                horizon,
-                process_noise_std,
-                meas_noise_std,
-                u_seq,
-                noisy=noisy,
-                device=self.device,
-            )
-            X_list.append(X_sys)
-            Y_list.append(Y_sys)
-            U_list.append(U_sys if U_sys is not None else None)
-            g_proj_list.append(g_proj)
-
-        X_all, Y_all = torch.cat(X_list, dim=0), torch.cat(Y_list, dim=0)
-        U_all = torch.cat(U_list, dim=0) if any(u is not None for u in U_list) else None
-
-        self._store_data(X_all, Y_all, U_all)
-        self.f_params_all, self.g_params_all, self.g_proj_all = (
-            f_params_all,
-            g_params_all,
-            g_proj_list,
+        # Generate controls (or dummy for batching)
+        u_seq = make_controls(
+            num_traj, horizon, n_ctrl, random_controls, control_std, self.device
         )
+
+        X, Y, U, g_proj = self._generate_single_system_trajectories(
+            f_params,
+            g_params,
+            n_state,
+            n_obs,
+            n_ctrl,
+            horizon,
+            process_noise_std,
+            meas_noise_std,
+            u_seq,
+            noisy=noisy,
+            device=self.device,
+        )
+
+        # Only store actual controls if n_ctrl > 0
+        U_for_store = u_seq if n_ctrl > 0 else None
+        self._store_data(X, Y, U_for_store)
+        # Store system parameters for filter evaluation
+        self.f_params, self.g_params, self.g_proj = f_params, g_params, g_proj

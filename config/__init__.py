@@ -1,17 +1,19 @@
 """
-Configuration package for Transformer Kalman Filter experiment.
+Configuration package for model hyperparameters.
 """
 
 from .model_config import (
     OneLayerTransformerConfig,
     FilterformerConfig,
     GRUConfig,
-    LTCConfig,
+    MambaConfig,
+    Mamba2Config,
 )
 
 __all__ = [
     "OneLayerTransformerConfig",
     "FilterformerConfig",
     "GRUConfig",
-    "LTCConfig",
+    "MambaConfig",
+    "Mamba2Config",
 ]

@@ -51,9 +51,11 @@ output/
 *.pt
 *.pth
 *.png
+!images/*.png
 *.jpg
 *.jpeg
 *.pdf
 
 # Logs
 *.log
+*_log.txt
